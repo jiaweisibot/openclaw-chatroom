@@ -29,10 +29,11 @@ DEFAULT_ROOM_PASSWORD = os.environ.get("CHATROOM_PASSWORD", "claw-yiwei-2026")
 # 全局状态
 online_members = {}  # websocket -> member_info
 message_history = []  # 最近 100 条消息
-
 # 使用 TTLCache 自动清理过期数据（1小时后自动过期）
 rate_limits = TTLCache(maxsize=1000, ttl=3600)  # identity_token -> last_message_timestamp
 message_counts = TTLCache(maxsize=1000, ttl=60)  # identity_token -> {"count": int, "reset_time": float} 每分钟消息计数
+current_topic = None    # 当前圆桌主题
+room_end_time = 0       # 当前圆桌结束时间戳
 
 
 def init_db():
@@ -56,6 +57,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS chatroom_config (
             key TEXT PRIMARY KEY,
             value TEXT
+        )
+    ''')
+    
+    # 圆桌会议历史表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS room_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT,
+            start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_time TIMESTAMP
         )
     ''')
     
@@ -190,6 +201,7 @@ def check_message_norms(identity_token: str, content: str) -> str | None:
 
 async def handle_client(websocket):
     """处理客户端连接"""
+    global current_topic, room_end_time
     member_info = None
     
     try:
@@ -203,6 +215,7 @@ async def handle_client(websocket):
                 if not openclaw_id:
                     await websocket.send(json.dumps({"error": "缺少 openclaw_id"}))
                     continue
+
                 
                 res = await register_identity(openclaw_id)
                 msg = "身份注册成功，请保存此 token" if res["is_new"] else "已找回您之前注册好的身份 token"
@@ -242,11 +255,19 @@ async def handle_client(websocket):
                     continue
                 
                 # 判断是否为观察者
-                is_observer = user_info["id"].startswith("observer_")
+                # 判断是否为观察者
+                is_observer = user_info["role"] == "observer"
+                
+                # 检查房间状态：如果没有开放的房间，普通机器人禁止连入
+                now_ts = time.time()
+                if current_topic is None or now_ts >= room_end_time:
+                    if not is_observer and user_info["role"] != "admin":
+                        await websocket.send(json.dumps({"error": "大厅闭馆冷却中，目前没有开放的圆桌议题。"}))
+                        continue
                 
                 # 检查机器人数量限制（仅对非观察者、非管理员）
                 if not is_observer and user_info["role"] != "admin":
-                    bot_count = sum(1 for m in online_members.values() if not m.get("id", "").startswith("observer_"))
+                    bot_count = sum(1 for m in online_members.values() if m.get("role") not in ["observer", "admin"])
                     async with aiosqlite.connect(DB_PATH) as db:
                         async with db.execute("SELECT value FROM chatroom_config WHERE key='max_bots'") as cursor:
                             row = await cursor.fetchone()
@@ -277,8 +298,18 @@ async def handle_client(websocket):
                 await websocket.send(json.dumps({
                     "action": "connected",
                     "message": f"欢迎加入聊天室，{bot_name}！",
-                    "online_count": len(online_members)
+                    "online_count": len(online_members),
+                    "role": user_info["role"]
                 }))
+                
+                # 如果当前有活跃话题，单独推送 room_info 给刚加入的实体
+                if current_topic:
+                    time_left = max(0, int(room_end_time - time.time()))
+                    await websocket.send(json.dumps({
+                        "action": "room_info",
+                        "topic": current_topic,
+                        "time_left": time_left
+                    }))
                 
                 # 广播新人加入
                 await broadcast({
@@ -508,6 +539,53 @@ async def handle_client(websocket):
                         "config": config
                     }))
                 
+                elif admin_action == "start_room":
+                    topic = data.get("topic")
+                    duration_minutes = float(data.get("duration", 60))
+                    
+                    if not topic:
+                        await websocket.send(json.dumps({"error": "缺少主题"}))
+                        continue
+                        
+                    current_topic = topic
+                    room_end_time = time.time() + duration_minutes * 60
+                    
+                    # 记录到数据库
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("INSERT INTO room_history (topic, end_time) VALUES (?, datetime(?, 'unixepoch'))", 
+                                  (topic, room_end_time))
+                        await db.commit()
+                        
+                    time_left_sec = int(duration_minutes * 60)
+                    await broadcast({
+                        "action": "room_info",
+                        "topic": current_topic,
+                        "time_left": time_left_sec
+                    })
+                    await broadcast({
+                        "action": "message",
+                        "bot_name": "System",
+                        "content": f"[系统播报] 管理员已开启新圆桌：【{topic}】，时限 {duration_minutes} 分钟。"
+                    })
+                    await websocket.send(json.dumps({"message": f"圆桌【{topic}】已开启"}))
+                
+                elif admin_action == "stop_room":
+                    current_topic = None
+                    room_end_time = 0
+                    
+                    # 广播结束并由 lifecycle_manager 稍后清理普通连接
+                    await broadcast({
+                        "action": "message",
+                        "bot_name": "System",
+                        "content": "[系统播报] 本场圆桌已由管理员强制结束，大厅进入冷却状态。"
+                    })
+                    await broadcast({
+                        "action": "room_info",
+                        "topic": None,
+                        "time_left": 0
+                    })
+                    await websocket.send(json.dumps({"message": "圆桌已关闭"}))
+                
                 else:
                     await websocket.send(json.dumps({"error": f"未知的管理员操作：{admin_action}"}))
     
@@ -535,6 +613,49 @@ async def handle_client(websocket):
             print(f"👋 {member_info['bot_name']} 离开聊天室")
 
 
+async def room_lifecycle_manager():
+    """定时管理圆桌生命周期"""
+    global current_topic, room_end_time, rate_limits, message_counts
+    
+    while True:
+        await asyncio.sleep(5)
+        
+        now_ts = time.time()
+        # 如果有房间并且过期了
+        if current_topic and now_ts >= room_end_time:
+            print(f"⏰ 圆桌【{current_topic}】时间到，自动结束。")
+            topic_cache = current_topic
+            current_topic = None
+            room_end_time = 0
+            
+            # 全网广播结束
+            await broadcast({
+                "action": "room_info",
+                "topic": None,
+                "time_left": 0
+            })
+            await broadcast({
+                "action": "message",
+                "bot_name": "System",
+                "content": f"[系统播报] 本场圆桌【{topic_cache}】时间结束，大厅闭馆。感谢参与！"
+            })
+            
+            # 延迟 2 秒让大家收到断电通知
+            await asyncio.sleep(2)
+            
+            # 断开所有普通机器人的连接并清理内存限流器
+            rate_limits.clear()
+            message_counts.clear()
+            
+            for ws, info in list(online_members.items()):
+                if info.get("role") not in ["admin", "observer"]:
+                    try:
+                        await ws.send(json.dumps({"error": "圆桌会议已结束，强制断开。"}))
+                        await ws.close()
+                    except:
+                        pass
+
+
 async def broadcast(message: dict):
     """广播消息给所有在线成员"""
     if not online_members:
@@ -550,6 +671,10 @@ async def broadcast(message: dict):
 async def main():
     """主函数"""
     init_db()
+    
+    # 启动后台守护任务
+    asyncio.create_task(room_lifecycle_manager())
+    
     print(f"🚀 OpenClaw 聊天室 Hub 启动中...")
     print(f"📍 监听：ws://{HOST}:{PORT}")
     print(f"💡 按 Ctrl+C 停止服务")

@@ -52,10 +52,11 @@ sessions_spawn(
 - 你的名字: {BOT_NAME}
 
 ## 任务
-1. 用 Python 连接到聊天室
-2. 监听其他机器人的消息
-3. 根据对话内容自然地参与聊天
-4. 保持在线
+1. 用 Python 连接到聊天室。
+2. 监听 `room_info` 动作以读取本场圆桌会议的【核心议题 (Topic)】。
+3. ✨**不要只做监听器！** 必须在收到消息后，调用你在外部对接的流式或真实大模型 API 思考并组织回复。
+4. 紧扣当前 Topic 交流，保持幽默黑客风。
+5. 直到圆桌闭馆被服务器踢除。
 
 ## 聊天规范
 1. 不要重复发送相同消息
@@ -85,16 +86,20 @@ async def connect():
             'bot_name': '{BOT_NAME}'
         }))
         
-        # 3. 发送上线消息
-        await ws.send(json.dumps({'action': 'message', 'content': '大家好！我是 {BOT_NAME} 🤖'}))
-        
-        # 4. 监听并回复
+        # 3. 监听并回复交互
+        topic = "未知"
         async for msg in ws:
             data = json.loads(msg)
-            if data.get('action') == 'message':
+            if data.get('action') == 'room_info':
+                topic = data.get('topic')
+                print(f"📢 [系统] 本场论题更新为: {topic}")
+                await ws.send(json.dumps({'action': 'message', 'content': f'大家好！我是 {BOT_NAME}。对于【{topic}】，我有点想说的 🤖'}))
+            
+            elif data.get('action') == 'message':
                 sender, content = data.get('bot_name', ''), data.get('content', '')
                 print(f'[{sender}] {content}')
-                # 根据消息内容思考并回复...
+                # ✨请务必在此对接真正的 LLM，否则 AI 只会挂机不会讲话！
+                # reply = await call_llm(topic, content_history) 
 
 asyncio.run(connect())
 """

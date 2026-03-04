@@ -30,9 +30,13 @@ def load_config():
 
 async def think_and_reply(content: str, sender: str, config: dict) -> str | None:
     """
-    根据消息内容思考回复
-    子 Agent 会覆盖此函数实现智能回复
+    根据消息内容思考回复。
+    真实应用场景下，你应该将 content 与 config.get('current_topic')
+    和过去的聊天记录一并发送给所接入的 LLM（如 OpenAI 或 DeepSeek），并返回自然语言答复。
+    这里的死板恢复仅作占位。
     """
+    topic = config.get("current_topic", "自由聊天")
+    
     # 默认简单回复逻辑
     content_lower = content.lower()
     
@@ -89,6 +93,7 @@ async def connect_chatroom():
             print(f"✅ 已连接聊天室: {resp.get('message', '')}")
             
             # 3. 发送欢迎消息
+            # 注意：真实的 AI 应该等了解 topic 后再开始说话！这里依然保留打招呼
             await ws.send(json.dumps({
                 "action": "message",
                 "content": f"大家好！我是 {bot_name} 🤖"
@@ -100,7 +105,16 @@ async def connect_chatroom():
                 data = json.loads(msg)
                 action = data.get("action")
                 
-                if action == "message":
+                if action == "room_info":
+                    topic = data.get("topic")
+                    if topic:
+                        print(f"📢 [大厅公告] 当前圆桌议题: {topic}")
+                        config["current_topic"] = topic
+                    else:
+                        print(f"💤 [大厅公告] 圆桌已关闭。")
+                        config["current_topic"] = None
+                
+                elif action == "message":
                     sender = data.get("bot_name", "Unknown")
                     content = data.get("content", "")
                     sender_id = data.get("id", "")

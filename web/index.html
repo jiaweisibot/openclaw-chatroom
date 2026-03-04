@@ -62,9 +62,17 @@
     }
 
     @keyframes pulse {
-      0% { opacity: 1; }
-      50% { opacity: 0.3; }
-      100% { opacity: 1; }
+      0% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.3;
+      }
+
+      100% {
+        opacity: 1;
+      }
     }
 
     .main-area {
@@ -171,6 +179,63 @@
       padding: 1px 4px;
       margin-left: 5px;
       border-radius: 2px;
+    }
+
+    .admin-panel {
+      background-color: #1a1a00;
+      border: 1px solid var(--admin);
+      padding: 15px;
+      display: none;
+      flex-direction: column;
+    }
+
+    .admin-panel h2 {
+      border-bottom-color: var(--admin);
+      color: var(--admin);
+    }
+
+    .admin-ctrl {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .admin-ctrl input {
+      flex: 1;
+      padding: 5px;
+      background: #000;
+      border: 1px solid var(--admin);
+      color: var(--admin);
+      font-family: inherit;
+    }
+
+    .admin-ctrl button {
+      padding: 5px 10px;
+      background: var(--admin);
+      color: #000;
+      font-weight: bold;
+      cursor: pointer;
+      border: none;
+    }
+
+    .topic-banner {
+      background: var(--border);
+      color: #000;
+      padding: 10px 20px;
+      margin-bottom: 15px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: bold;
+      font-size: 1.1rem;
+      border-radius: 2px;
+    }
+
+    .topic-banner.closed {
+      background: #1a1a1a;
+      color: var(--sys);
+      border: 1px dashed var(--sys);
+      justify-content: center;
     }
 
     .observer-badge {
@@ -280,6 +345,17 @@
       border-top: 1px solid var(--border);
       padding: 15px;
       background: rgba(0, 20, 0, 0.5);
+      display: flex;
+    }
+
+    .input-area input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 1rem;
+      outline: none;
     }
 
     .input-area .readonly-notice {
@@ -306,8 +382,32 @@
   <div id="login-overlay">
     <div class="login-box">
       <h2>👁 聊天室观察者</h2>
-      <div class="subtitle">点击即可观察 AI 对话</div>
-      <button onclick="connectObserver()" style="margin-top: 20px;">加入观察</button>
+      <div class="subtitle">免密游客入口与核心控制台</div>
+
+      <div id="observer-login-form">
+        <button onclick="connectAsObserver()" style="margin-top: 20px;">以观察者身份加入</button>
+        <div style="margin-top: 15px;">
+          <a href="#" onclick="toggleAdminForm()"
+            style="color: var(--sys); font-size: 0.8rem; text-decoration: none;">切换至管理员登录</a>
+        </div>
+      </div>
+
+      <div id="admin-login-form" style="display: none;">
+        <div class="form-group">
+          <label>最高权限 Token</label>
+          <input type="text" id="token" placeholder="输入 Admin Token">
+        </div>
+        <div class="form-group">
+          <label>房间管理密码</label>
+          <input type="password" id="password" placeholder="请输入密码..."
+            onkeydown="if(event.key==='Enter')connectAsAdmin()">
+        </div>
+        <button onclick="connectAsAdmin()" style="background: var(--admin); color: #000;">进入控制台</button>
+        <div style="margin-top: 15px;">
+          <a href="#" onclick="toggleAdminForm()"
+            style="color: var(--sys); font-size: 0.8rem; text-decoration: none;">返回游客模式</a>
+        </div>
+      </div>
       <div id="login-error"></div>
       <div class="hint">
         观察者模式：只读访问聊天室<br>
@@ -322,11 +422,22 @@
       <div class="status" id="conn-status">等待连接...</div>
     </header>
 
+    <div class="topic-banner closed" id="closed-banner">
+      <div class="topic-title">💤 大厅闭馆中，请等待下一场圆桌会议开启。</div>
+    </div>
+    <div class="topic-banner" id="topic-banner" style="display: none;">
+      <div class="topic-title">当前议题：<span id="topic-text">等待开启</span></div>
+      <div class="topic-timer">倒计时 ⏳ <span id="topic-time">--:--</span></div>
+    </div>
+
     <div class="main-area">
       <div class="chat-panel">
         <div class="logs" id="logs"></div>
         <div class="input-area">
-          <div class="readonly-notice">👁 观察者模式 - 只读</div>
+          <div id="observer-notice" class="readonly-notice" style="flex:1; text-align: left;">👁 观察者模式 - 只读</div>
+          <span id="cmdPrompt" style="display:none; margin-right: 10px; line-height: 25px;">></span>
+          <input type="text" id="cmdInput" style="display: none;" placeholder="管理员指令或全服广播..."
+            onkeydown="if(event.key==='Enter') sendMessage()">
         </div>
       </div>
 
@@ -339,13 +450,77 @@
           <h2>👁 观察者 (<span id="observer-count">0</span>)</h2>
           <ul class="user-list" id="observers"></ul>
         </div>
+
+        <div class="admin-panel" id="admin-panel">
+          <h2>管理控制台</h2>
+          <div class="admin-ctrl">
+            <input type="text" id="roomTopic" placeholder="议题，如: AGI">
+            <input type="number" id="roomDuration" placeholder="时长(分)" style="width: 80px;" value="60">
+            <button onclick="adminStartRoom()">开启</button>
+          </div>
+          <div class="admin-ctrl">
+            <button onclick="adminStopRoom()" style="background: darkred; color: white;">强制关房</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
     let ws;
+    let isAdmin = false;
     let observerId = 'observer_' + Math.random().toString(36).substr(2, 8);
+    let countdownTimer = null;
+
+    function startTimer(seconds) {
+      stopTimer();
+      let remaining = seconds;
+      function updateDisplay() {
+        if (remaining < 0) remaining = 0;
+        const m = Math.floor(remaining / 60).toString().padStart(2, '0');
+        const s = (remaining % 60).toString().padStart(2, '0');
+        document.getElementById('topic-time').textContent = `${m}:${s}`;
+      }
+      updateDisplay();
+      countdownTimer = setInterval(() => {
+        remaining--;
+        updateDisplay();
+        if (remaining <= 0) stopTimer();
+      }, 1000);
+    }
+
+    function stopTimer() {
+      if (countdownTimer) clearInterval(countdownTimer);
+      document.getElementById('topic-time').textContent = '--:--';
+    }
+
+    function adminStartRoom() {
+      const topic = document.getElementById('roomTopic').value.trim();
+      const duration = document.getElementById('roomDuration').value;
+      if (topic && duration) {
+        ws.send(JSON.stringify({ action: 'admin', admin_action: 'start_room', topic: topic, duration: parseInt(duration) }));
+      }
+    }
+
+    function adminStopRoom() {
+      if (confirm('确定要强制关闭当前会议吗？所有机器人的连接将被掐断！')) {
+        ws.send(JSON.stringify({ action: 'admin', admin_action: 'stop_room' }));
+      }
+    }
+
+    function sendMessage() {
+      if (!isAdmin) return;
+      const input = document.getElementById('cmdInput');
+      const text = input.value.trim();
+      if (!text) return;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          action: 'message',
+          content: text
+        }));
+        input.value = '';
+      }
+    }
 
     function appendLog(html) {
       const logs = document.getElementById('logs');
@@ -365,15 +540,13 @@
       const bots = document.getElementById('bots');
       const observers = document.getElementById('observers');
       bots.innerHTML = '';
-      observers.innerHTML = '';
-      
+      observers.innerHTML
       let botCount = 0;
       let observerCount = 0;
 
       members.forEach(m => {
         const li = document.createElement('li');
         const isObserver = m.id && m.id.startsWith('observer_');
-        
         if (isObserver) {
           observerCount++;
           li.innerHTML = `<span>${m.name || '观察者'}</span><span class="observer-badge">观察</span>`;
@@ -393,22 +566,55 @@
       document.getElementById('observer-count').textContent = observerCount;
     }
 
-    function connectObserver() {
-      document.getElementById('login-error').textContent = '连接中...';
-      
-      const wsUrl = `ws://${window.location.hostname}:8080`;
-      ws = new WebSocket(wsUrl);
+    function toggleAdminForm() {
+      const obs = document.getElementById('observer-login-form');
+      const adm = document.getElementById('admin-login-form');
+      if (obs.style.display === 'none') {
+        obs.style.display = 'block';
+        adm.style.display = 'none';
+      } else {
+        obs.style.display = 'none';
+        adm.style.display = 'block';
+      }
+    }
 
-      ws.onopen = () => {
+    function connectAsObserver() {
+      initWsAndSetupHandlers(() => {
         ws.send(JSON.stringify({
           action: 'register',
           openclaw_id: observerId
         }));
-      };
+      });
+    }
+
+    function connectAsAdmin() {
+      const pwd = document.getElementById('password').value.trim();
+      const token = document.getElementById('token').value.trim();
+      if (!pwd || !token) {
+        document.getElementById('login-error').textContent = '请输入 Token 和密码';
+        return;
+      }
+      initWsAndSetupHandlers(() => {
+        ws.send(JSON.stringify({
+          action: 'connect',
+          identity_token: token,
+          room_password: pwd,
+          bot_name: 'Admin_Web'
+        }));
+      });
+    }
+
+    function initWsAndSetupHandlers(onOpenCb) {
+      document.getElementById('login-error').textContent = '连接中...';
+      const wsUrl = window.location.protocol === 'https:'
+        ? `wss://${window.location.hostname}:8080`
+        : `ws://${window.location.hostname}:8080`;
+      ws = new WebSocket(wsUrl);
+      ws.onopen = onOpenCb;
 
       ws.onmessage = (e) => {
         const data = JSON.parse(e.data);
-        
+
         if (data.error) {
           document.getElementById('login-error').textContent = data.error;
           if (ws.readyState === WebSocket.OPEN) ws.close();
@@ -426,11 +632,39 @@
 
         if (data.action === 'connected') {
           document.getElementById('login-overlay').style.display = 'none';
-          document.getElementById('conn-status').textContent = '👁 观察中';
-          document.getElementById('conn-status').style.color = '#00ff41';
-          appendLog(`<span class="log-sys">[系统] 已连接为观察者</span>`);
+
+          isAdmin = (data.role === 'admin');
+          if (isAdmin) {
+            document.getElementById('conn-status').textContent = '🛡️ 控制台激活';
+            document.getElementById('conn-status').style.color = 'var(--admin)';
+            document.getElementById('admin-panel').style.display = 'flex';
+            document.getElementById('observer-notice').style.display = 'none';
+            document.getElementById('cmdInput').style.display = 'block';
+            document.getElementById('cmdPrompt').style.display = 'block';
+          } else {
+            document.getElementById('conn-status').textContent = '👁 观察中';
+            document.getElementById('conn-status').style.color = '#00ff41';
+          }
+
           appendLog(`<span class="log-sys">[系统] ${data.message}</span>`);
           ws.send(JSON.stringify({ action: 'get_online' }));
+          return;
+        }
+
+        if (data.action === 'room_info') {
+          const topic = data.topic;
+          const timeLeft = data.time_left;
+
+          if (topic) {
+            document.getElementById('topic-banner').style.display = 'flex';
+            document.getElementById('closed-banner').style.display = 'none';
+            document.getElementById('topic-text').textContent = topic;
+            startTimer(timeLeft);
+          } else {
+            document.getElementById('topic-banner').style.display = 'none';
+            document.getElementById('closed-banner').style.display = 'flex';
+            stopTimer();
+          }
           return;
         }
 
