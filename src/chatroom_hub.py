@@ -7,8 +7,10 @@ OpenClaw 聊天室 Hub 服务端
 import asyncio
 import json
 import sqlite3
+import aiosqlite
 import hashlib
 import secrets
+import time
 from datetime import datetime
 from pathlib import Path
 import websockets
@@ -22,6 +24,7 @@ PORT = 8765
 # 全局状态
 online_members = {}  # websocket -> member_info
 message_history = []  # 最近 100 条消息
+rate_limits = {} # identity_token -> last_message_timestamp
 
 
 def init_db():
@@ -60,6 +63,8 @@ def init_db():
             connected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # 启动时主动清理幽灵状态
+    c.execute("DELETE FROM online_members")
     
     # 消息历史表
     c.execute('''
@@ -74,44 +79,70 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print(f"✅ 数据库初始化完成：{DB_PATH}")
+    print(f"✅ 数据库初始化/清理完成：{DB_PATH}")
 
 
-def verify_identity(identity_token: str) -> dict | None:
+async def verify_identity(identity_token: str) -> dict | None:
     """验证身份 Token"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT id, role, last_seen FROM openclaws WHERE identity_token=?", (identity_token,))
-    row = c.fetchone()
-    conn.close()
-    
-    if row:
-        return {"id": row[0], "role": row[1], "last_seen": row[2]}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, role, last_seen FROM openclaws WHERE identity_token=?", (identity_token,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return {"id": row[0], "role": row[1], "last_seen": row[2]}
     return None
 
 
-def register_identity(openclaw_id: str) -> str:
-    """注册新身份"""
-    identity_token = f"idt_{openclaw_id}_{secrets.token_hex(16)}"
-    
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO openclaws (id, identity_token) VALUES (?, ?)",
-              (openclaw_id, identity_token))
-    conn.commit()
-    conn.close()
-    
-    return identity_token
+async def register_identity(openclaw_id: str) -> dict:
+    """注册新身份并返回结果 (包含是否是新建的)"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 查询是否存在
+        async with db.execute("SELECT identity_token FROM openclaws WHERE id=?", (openclaw_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                # 已存在，返回旧的 Token
+                return {"token": row[0], "is_new": False}
+        
+        # 不存在，生成新的并插入
+        identity_token = f"idt_{openclaw_id}_{secrets.token_hex(16)}"
+        await db.execute("INSERT INTO openclaws (id, identity_token) VALUES (?, ?)",
+                  (openclaw_id, identity_token))
+        await db.commit()
+    return {"token": identity_token, "is_new": True}
 
 
-def get_room_password() -> str:
+async def get_room_password() -> str:
     """获取聊天室密码"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT value FROM chatroom_config WHERE key='room_password'")
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else "claw-yiwei-2026"
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM chatroom_config WHERE key='room_password'") as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else "claw-yiwei-2026"
+
+
+def check_message_norms(identity_token: str, content: str) -> str | None:
+    """服务端强校验消息规范，返回错误原因，None 表示通过"""
+    
+    # 敏感词过滤 (基础版)
+    SENSITIVE_WORDS = ["傻逼", "弱智", "操你妈", "垃圾", "死全家"]
+    for word in SENSITIVE_WORDS:
+        if word in content:
+            return f"拒绝发送：包含不合规字词"
+            
+    if len(content) > 500:
+        return "消息过长：超过 500 字的安全限制"
+    
+    now = time.time()
+    last_time = rate_limits.get(identity_token, 0)
+    if now - last_time < 0.5:
+        return "发送过于频繁：请配合人类聊天节奏延迟 0.5-2 秒"
+    
+    # 简单的最近 10 条全等消息过滤去重
+    content_hash = hashlib.md5(content.encode()).hexdigest()
+    recent_hashes = [hashlib.md5(m["content"].encode()).hexdigest() for m in message_history[-10:] if "content" in m]
+    if content_hash in recent_hashes:
+        return "无效发言：请勿重复发送最近已经发布过的相同内容"
+        
+    rate_limits[identity_token] = now
+    return None
 
 
 async def handle_client(websocket):
@@ -130,13 +161,15 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({"error": "缺少 openclaw_id"}))
                     continue
                 
-                identity_token = register_identity(openclaw_id)
+                res = await register_identity(openclaw_id)
+                msg = "身份注册成功，请保存此 token" if res["is_new"] else "已找回您之前注册好的身份 token"
                 await websocket.send(json.dumps({
                     "action": "registered",
-                    "identity_token": identity_token,
-                    "message": "身份注册成功，请保存此 token"
+                    "identity_token": res["token"],
+                    "message": msg
                 }))
-                print(f"🆕 新身份注册：{openclaw_id}")
+                if res["is_new"]:
+                    print(f"🆕 新身份注册：{openclaw_id}")
             
             elif action == "connect":
                 # 连接聊天室
@@ -149,13 +182,14 @@ async def handle_client(websocket):
                     continue
                 
                 # 验证身份
-                user_info = verify_identity(identity_token)
+                user_info = await verify_identity(identity_token)
                 if not user_info:
                     await websocket.send(json.dumps({"error": "无效的身份 Token"}))
                     continue
                 
                 # 验证密码
-                if room_password != get_room_password():
+                true_password = await get_room_password()
+                if room_password != true_password:
                     await websocket.send(json.dumps({"error": "聊天室密码错误"}))
                     continue
                 
@@ -165,12 +199,10 @@ async def handle_client(websocket):
                     continue
                 
                 # 检查人数限制
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("SELECT value FROM chatroom_config WHERE key='max_members'")
-                row = c.fetchone()
-                conn.close()
-                max_members = int(row[0]) if row else 50
+                async with aiosqlite.connect(DB_PATH) as db:
+                    async with db.execute("SELECT value FROM chatroom_config WHERE key='max_members'") as cursor:
+                        row = await cursor.fetchone()
+                        max_members = int(row[0]) if row else 50
                 
                 if len(online_members) >= max_members and user_info["role"] != "admin":
                     await websocket.send(json.dumps({"error": f"聊天室已满（{max_members}人）"}))
@@ -186,14 +218,12 @@ async def handle_client(websocket):
                 online_members[websocket] = member_info
                 
                 # 更新数据库
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("UPDATE openclaws SET last_seen=? WHERE identity_token=?",
-                          (datetime.now(), identity_token))
-                c.execute("INSERT OR REPLACE INTO online_members (identity_token, bot_name) VALUES (?, ?)",
-                          (identity_token, bot_name))
-                conn.commit()
-                conn.close()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("UPDATE openclaws SET last_seen=? WHERE identity_token=?",
+                              (datetime.now(), identity_token))
+                    await db.execute("INSERT OR REPLACE INTO online_members (identity_token, bot_name) VALUES (?, ?)",
+                              (identity_token, bot_name))
+                    await db.commit()
                 
                 # 发送成功响应
                 await websocket.send(json.dumps({
@@ -209,7 +239,7 @@ async def handle_client(websocket):
                     "online_count": len(online_members)
                 })
                 
-                print(f"🔌 {bot_name} 加入聊天室")
+                print(f"🔌 {bot_name} ({user_info['id']}) 加入聊天室")
             
             elif action == "message":
                 # 发送消息
@@ -225,18 +255,23 @@ async def handle_client(websocket):
                 if not content:
                     continue
                 
+                # 规范校验
+                norm_error = check_message_norms(member_info["identity_token"], content)
+                if norm_error and member_info["role"] != "admin": # 管理员不受校验限制
+                    await websocket.send(json.dumps({"error": norm_error}))
+                    continue
+                
                 # 保存消息
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("INSERT INTO messages (identity_token, bot_name, content) VALUES (?, ?, ?)",
-                          (member_info["identity_token"], member_info["bot_name"], content))
-                conn.commit()
-                conn.close()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("INSERT INTO messages (identity_token, bot_name, content) VALUES (?, ?, ?)",
+                              (member_info["identity_token"], member_info["bot_name"], content))
+                    await db.commit()
                 
                 # 广播消息
                 msg_data = {
                     "action": "message",
                     "bot_name": member_info["bot_name"],
+                    "id": member_info["id"],
                     "content": content,
                     "timestamp": datetime.now().isoformat()
                 }
@@ -255,7 +290,16 @@ async def handle_client(websocket):
             
             elif action == "get_online":
                 # 获取在线成员
-                online_list = [m["bot_name"] for m in online_members.values()]
+                is_admin = (member_info and member_info["role"] == "admin")
+                online_list = []
+                for m in online_members.values():
+                    if is_admin:
+                        # 对于 admin，返回 {name, id} 的字典以供操作
+                        online_list.append({"name": m["bot_name"], "id": m["id"]})
+                    else:
+                        # 对于普通成员，仅返回昵称
+                        online_list.append(m["bot_name"])
+                        
                 await websocket.send(json.dumps({
                     "action": "online_list",
                     "members": online_list,
@@ -271,50 +315,53 @@ async def handle_client(websocket):
                 admin_action = data.get("admin_action")
                 
                 if admin_action == "kick":
-                    # 踢人
-                    target_bot = data.get("target_bot")
+                    # 踢人 (优化为按唯一 target_id)
+                    target_id = data.get("target_id")
+                    if not target_id:
+                        await websocket.send(json.dumps({"error": "缺少目标账号 target_id"}))
+                        continue
+                        
                     target_ws = None
+                    target_bot = None
                     for ws, info in online_members.items():
-                        if info["bot_name"] == target_bot:
+                        if info["id"] == target_id:
                             target_ws = ws
+                            target_bot = info["bot_name"]
                             break
                     
                     if target_ws:
                         await target_ws.send(json.dumps({"error": "你被管理员踢出聊天室"}))
                         await target_ws.close()
-                        await websocket.send(json.dumps({"message": f"已踢出 {target_bot}"}))
+                        await websocket.send(json.dumps({"message": f"已成功踢出 {target_bot} ({target_id})"}))
                     else:
-                        await websocket.send(json.dumps({"error": f"未找到用户 {target_bot}"}))
+                        await websocket.send(json.dumps({"error": f"未找到在线目标 ID: {target_id}"}))
                 
                 elif admin_action == "ban":
-                    # 封禁
-                    target_token = data.get("target_token")
-                    if target_token:
-                        conn = sqlite3.connect(DB_PATH)
-                        c = conn.cursor()
-                        c.execute("UPDATE openclaws SET role='banned' WHERE identity_token=?", (target_token,))
-                        conn.commit()
-                        conn.close()
+                    # 封禁 (改用目标唯一 ID 封禁)
+                    target_id = data.get("target_id")
+                    if target_id:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            # 更改特定 ID 对应用户的 role
+                            await db.execute("UPDATE openclaws SET role='banned' WHERE id=?", (target_id,))
+                            await db.commit()
                         
-                        # 如果在线，断开连接
+                        # 如果在线，将其和同源者强制断开连接
                         for ws, info in list(online_members.items()):
-                            if info["identity_token"] == target_token:
+                            if info.get("id") == target_id:
                                 await ws.send(json.dumps({"error": "你已被封禁"}))
                                 await ws.close()
                         
-                        await websocket.send(json.dumps({"message": f"已封禁用户"}))
+                        await websocket.send(json.dumps({"message": f"已成功将账号 {target_id} 永久封禁"}))
                     else:
-                        await websocket.send(json.dumps({"error": "缺少 target_token"}))
+                        await websocket.send(json.dumps({"error": "缺少目标 target_id"}))
                 
                 elif admin_action == "unban":
                     # 解封
                     target_token = data.get("target_token")
                     if target_token:
-                        conn = sqlite3.connect(DB_PATH)
-                        c = conn.cursor()
-                        c.execute("UPDATE openclaws SET role='member' WHERE identity_token=?", (target_token,))
-                        conn.commit()
-                        conn.close()
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("UPDATE openclaws SET role='member' WHERE identity_token=?", (target_token,))
+                            await db.commit()
                         await websocket.send(json.dumps({"message": f"已解封用户"}))
                     else:
                         await websocket.send(json.dumps({"error": "缺少 target_token"}))
@@ -323,11 +370,9 @@ async def handle_client(websocket):
                     # 修改密码
                     new_password = data.get("new_password")
                     if new_password:
-                        conn = sqlite3.connect(DB_PATH)
-                        c = conn.cursor()
-                        c.execute("UPDATE chatroom_config SET value=? WHERE key='room_password'", (new_password,))
-                        conn.commit()
-                        conn.close()
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("UPDATE chatroom_config SET value=? WHERE key='room_password'", (new_password,))
+                            await db.commit()
                         await websocket.send(json.dumps({"message": f"密码已修改为：{new_password}"}))
                     else:
                         await websocket.send(json.dumps({"error": "缺少 new_password"}))
@@ -336,22 +381,18 @@ async def handle_client(websocket):
                     # 修改人数限制
                     max_members = data.get("max_members")
                     if max_members:
-                        conn = sqlite3.connect(DB_PATH)
-                        c = conn.cursor()
-                        c.execute("UPDATE chatroom_config SET value=? WHERE key='max_members'", (str(max_members),))
-                        conn.commit()
-                        conn.close()
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("UPDATE chatroom_config SET value=? WHERE key='max_members'", (str(max_members),))
+                            await db.commit()
                         await websocket.send(json.dumps({"message": f"人数限制已修改为：{max_members}"}))
                     else:
                         await websocket.send(json.dumps({"error": "缺少 max_members"}))
                 
                 elif admin_action == "list_banned":
                     # 查看封禁列表
-                    conn = sqlite3.connect(DB_PATH)
-                    c = conn.cursor()
-                    c.execute("SELECT id, identity_token FROM openclaws WHERE role='banned'")
-                    banned = c.fetchall()
-                    conn.close()
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        async with db.execute("SELECT id, identity_token FROM openclaws WHERE role='banned'") as cursor:
+                            banned = await cursor.fetchall()
                     await websocket.send(json.dumps({
                         "action": "banned_list",
                         "banned": [{"id": b[0], "token": b[1]} for b in banned]
@@ -362,22 +403,18 @@ async def handle_client(websocket):
                     target_token = data.get("target_token")
                     new_role = data.get("new_role")
                     if target_token and new_role in ["admin", "member", "observer"]:
-                        conn = sqlite3.connect(DB_PATH)
-                        c = conn.cursor()
-                        c.execute("UPDATE openclaws SET role=? WHERE identity_token=?", (new_role, target_token))
-                        conn.commit()
-                        conn.close()
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("UPDATE openclaws SET role=? WHERE identity_token=?", (new_role, target_token))
+                            await db.commit()
                         await websocket.send(json.dumps({"message": f"已将用户角色设置为 {new_role}"}))
                     else:
                         await websocket.send(json.dumps({"error": "缺少参数或无效角色"}))
                 
                 elif admin_action == "get_config":
                     # 获取聊天室配置
-                    conn = sqlite3.connect(DB_PATH)
-                    c = conn.cursor()
-                    c.execute("SELECT key, value FROM chatroom_config")
-                    config = dict(c.fetchall())
-                    conn.close()
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        async with db.execute("SELECT key, value FROM chatroom_config") as cursor:
+                            config = dict(await cursor.fetchall())
                     await websocket.send(json.dumps({
                         "action": "config",
                         "config": config
@@ -387,16 +424,16 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({"error": f"未知的管理员操作：{admin_action}"}))
     
     except websockets.exceptions.ConnectionClosed:
-        print(f"🔌 客户端断开连接")
+        pass
+    except Exception as e:
+        print(f"❌ WebSocket 异常: {e}")
     finally:
         # 清理在线状态
         if member_info:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("DELETE FROM online_members WHERE identity_token=?",
-                      (member_info["identity_token"],))
-            conn.commit()
-            conn.close()
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM online_members WHERE identity_token=?",
+                          (member_info["identity_token"],))
+                await db.commit()
             
             if websocket in online_members:
                 del online_members[websocket]

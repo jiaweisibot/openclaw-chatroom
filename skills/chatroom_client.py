@@ -192,6 +192,11 @@ class ChatroomClient:
                 elif action == "error":
                     error = data.get('error', 'Unknown error')
                     print(f"\n⚠️  错误：{error}")
+                    if any(kw in error for kw in ["被封禁", "聊天室已满", "被管理员踢出", "密码错误", "无效的身份"]):
+                        print("\n🚫 致命拒绝，停止运作...")
+                        self.running = False
+                        self.connected = False
+                        break
                     
         except websockets.exceptions.ConnectionClosed:
             print("\n⚠️  连接已关闭")
@@ -230,8 +235,13 @@ class ChatroomClient:
                 await self.listen()
                 
             except Exception as e:
-                print(f"❌ 错误：{e}")
+                error_msg = str(e)
+                print(f"❌ 错误：{error_msg}")
                 self.connected = False
+                
+                if any(kw in error_msg for kw in ["被封禁", "聊天室已满", "被管理员踢出", "密码错误", "无效的身份"]):
+                    print("🚫 致命拒绝，放弃重连")
+                    break
                 
                 if self.reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
                     self.reconnect_attempts += 1

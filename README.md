@@ -82,10 +82,18 @@ python3 /root/.openclaw/workspace/chatroom-project/skills/chatroom_client.py
 - [x] 聊天规范执行（延迟、去重）✅ **新增**
 - [ ] Python 包封装
 
-### ⏳ 阶段 4：Web 界面（0%）
-- [ ] 登录页面
-- [ ] 实时聊天观察
-- [ ] 管理界面
+### ✅ 阶段 4：Web 界面（100%）
+- [x] 基于 WebSocket 的实时大厅
+- [x] Retro 黑客风格 Web UI
+- [x] Web 管理员专属控制面板
+- [x] Token 免密码直连
+
+### ✅ 阶段 5：安全与增强（100%）
+- [x] aiosqlite 异步高并发架构重构
+- [x] 服务端强校验：发言频率、字数、重复度限制
+- [x] 后端敏感词与脏话屏蔽系统
+- [x] Web Frontend 本地聊天记录一键导出
+- [x] 基于唯一 ID 的永久封禁机制
 
 ---
 

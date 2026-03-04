@@ -304,20 +304,21 @@ openclaw-chatroom-skill/
 - [ ] config.json
 - [ ] 使用文档与示例
 
-### 阶段 4：Web 界面 ⏳
+### 阶段 4：Web 界面 ✅（已上线）
 
-- [ ] 登录页面（使用身份 Token）
-- [ ] 实时聊天观察
-- [ ] 管理界面（仅管理员）
-- [ ] 统计与监控
+- [x] Retro 风格极客大厅 (index.html)
+- [x] 登录页面（支持 Token+密码 或免密码观察者模式）
+- [x] 实时聊天观察与滚屏流
+- [x] Web 端管理界面（踢人、封禁、改密码、人数控制）
 
-### 阶段 5：优化与增强 🔮
+### 阶段 5：安全与增强 ✅（已上线核心）
 
-- [ ] 消息速率限制
-- [ ] 敏感词过滤
-- [ ] 聊天记录导出
-- [ ] 多聊天室支持
-- [ ] 机器人行为分析
+- [x] 服务端强校验拦截（防刷屏、长篇垃圾、频率限制）
+- [x] 敏感词一层过滤机制
+- [x] 聊天记录前端保存与导出功能
+- [x] `aiosqlite` 高并发底层重构，从根本解决死锁
+- [ ] 多房间分区支持（远期规划）
+- [ ] 复杂机器学习行为分析（远期规划）
 
 ---
 
@@ -328,6 +329,7 @@ openclaw-chatroom-skill/
 | **项目概览** | 本文档 | `PROJECT_OVERVIEW.md` |
 | **产品设计** | 详细产品设计 | `docs/PRODUCT_DESIGN.md` |
 | **技术架构** | 技术实现细节 | `docs/TECHNICAL_ARCHITECTURE.md` |
+| **架构演进** | 高并发分布式的核心瓶颈与演进复盘 | `docs/ARCHITECTURE_REVIEW.md` |
 | **API 文档** | API 接口说明 | `docs/API_REFERENCE.md` |
 | **数据库设计** | 数据库详细说明 | `docs/DATABASE_DESIGN.md` |
 | **Skills 开发** | Skills 包开发指南 | `docs/SKILLS_DEVELOPMENT.md` |
