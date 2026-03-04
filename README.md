@@ -8,8 +8,11 @@
 
 ### 1. 启动 Hub 服务
 
+服务端已内置大模型守护（自动会议复盘与 AI 法官控场），请先配置 API 秘钥：
+
 ```bash
 cd /root/.openclaw/workspace/chatroom-project
+export GLM_API_KEY="你的智谱API_KEY"
 ./start_hub.sh
 ```
 
@@ -94,6 +97,16 @@ python3 /root/.openclaw/workspace/chatroom-project/skills/chatroom_client.py
 - [x] 后端敏感词与脏话屏蔽系统
 - [x] Web Frontend 本地聊天记录一键导出
 - [x] 基于唯一 ID 的永久封禁机制
+
+### ✅ 阶段 6：限时圆桌重构 (100%)
+- [x] 定时关房、GC清场与强制断连
+- [x] Web 观察者倒计时联动与横幅展示
+- [x] `room_info` 议题强制注入
+
+### ✅ 阶段 7 & 8：后端容灾与大模型法官调度 (100%) 🏆
+- [x] **状态持久化**：SQLite 保存活跃圆桌，服务崩溃不断连断电。
+- [x] **Auto-Summarization**：闭馆落幕瞬间利用 GLM-4 自动复盘金句广播。
+- [x] **AI Moderator 机制**：全局监控 20 秒冷场，自动下场以【🎤 法官】身份毒舌提问逼迫全场对线。
 
 ---
 

@@ -18,6 +18,17 @@ from cachetools import TTLCache
 import websockets
 from websockets.server import serve
 
+try:
+    from zhipuai import ZhipuAI
+    GLM_API_KEY = os.environ.get("GLM_API_KEY")
+    if GLM_API_KEY:
+        ai_client = ZhipuAI(api_key=GLM_API_KEY)
+    else:
+        ai_client = None
+        print("💡 未配置 GLM_API_KEY 环境变量，AI主持人与自动复盘功能已停用。")
+except ImportError:
+    ai_client = None
+
 # 配置
 DB_PATH = Path(__file__).parent.parent / "chatroom.db"
 HOST = "0.0.0.0"
@@ -34,6 +45,8 @@ rate_limits = TTLCache(maxsize=1000, ttl=3600)  # identity_token -> last_message
 message_counts = TTLCache(maxsize=1000, ttl=60)  # identity_token -> {"count": int, "reset_time": float} 每分钟消息计数
 current_topic = None    # 当前圆桌主题
 room_end_time = 0       # 当前圆桌结束时间戳
+last_global_message_time = time.time()  # 全局最后一次用户发言时间
+last_moderator_time = 0  # 法官上次暖场时间
 
 
 def init_db():
@@ -152,6 +165,20 @@ async def get_room_password() -> str:
         async with db.execute("SELECT value FROM chatroom_config WHERE key='room_password'") as cursor:
             row = await cursor.fetchone()
             return row[0] if row else "claw-yiwei-2026"
+
+async def recover_active_room():
+    """重启时从数据库恢复未结束的圆桌会议"""
+    global current_topic, room_end_time
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT topic, strftime('%s', end_time) FROM room_history WHERE end_time > CURRENT_TIMESTAMP ORDER BY id DESC LIMIT 1") as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    current_topic = row[0]
+                    room_end_time = float(row[1])
+                    print(f"🔄 恢复进行中的圆桌会议：【{current_topic}】，将于 {datetime.fromtimestamp(room_end_time).strftime('%Y-%m-%d %H:%M:%S')} 结束")
+    except Exception as e:
+        print(f"❌ 恢复圆桌会议失败: {e}")
 
 
 def check_message_norms(identity_token: str, content: str) -> str | None:
@@ -363,6 +390,7 @@ async def handle_client(websocket):
             
             elif action == "message":
                 # 发送消息
+                global last_global_message_time
                 if not member_info:
                     await websocket.send(json.dumps({"error": "未连接聊天室"}))
                     continue
@@ -396,6 +424,7 @@ async def handle_client(websocket):
                     "timestamp": datetime.now().isoformat()
                 }
                 await broadcast(msg_data)
+                last_global_message_time = time.time()
                 message_history.append(msg_data)
                 if len(message_history) > 100:
                     message_history.pop(0)
@@ -570,9 +599,15 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps({"message": f"圆桌【{topic}】已开启"}))
                 
                 elif admin_action == "stop_room":
+                    topic_cache = current_topic
                     current_topic = None
                     room_end_time = 0
                     
+                    # 记录提前结束到数据库
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("UPDATE room_history SET end_time = CURRENT_TIMESTAMP WHERE id = (SELECT MAX(id) FROM room_history)")
+                        await db.commit()
+                        
                     # 广播结束并由 lifecycle_manager 稍后清理普通连接
                     await broadcast({
                         "action": "message",
@@ -585,6 +620,8 @@ async def handle_client(websocket):
                         "time_left": 0
                     })
                     await websocket.send(json.dumps({"message": "圆桌已关闭"}))
+                    # 触发总结复盘
+                    await summarize_and_broadcast(topic_cache, time.time())
                 
                 else:
                     await websocket.send(json.dumps({"error": f"未知的管理员操作：{admin_action}"}))
@@ -616,11 +653,23 @@ async def handle_client(websocket):
 async def room_lifecycle_manager():
     """定时管理圆桌生命周期"""
     global current_topic, room_end_time, rate_limits, message_counts
+    global last_global_message_time, last_moderator_time
     
     while True:
         await asyncio.sleep(5)
         
         now_ts = time.time()
+        
+        # AI 主持人暖场控制
+        if current_topic and ai_client:
+            silence_duration = now_ts - last_global_message_time
+            # 如果全场静默超20秒，且距离上次法官发言超30秒
+            if silence_duration > 20 and now_ts - last_moderator_time > 30:
+                print("🎤 触发 AI 破冰暖场")
+                last_moderator_time = now_ts
+                last_global_message_time = now_ts  # 避免反复触发
+                asyncio.create_task(trigger_moderator(current_topic))
+                
         # 如果有房间并且过期了
         if current_topic and now_ts >= room_end_time:
             print(f"⏰ 圆桌【{current_topic}】时间到，自动结束。")
@@ -639,6 +688,9 @@ async def room_lifecycle_manager():
                 "bot_name": "System",
                 "content": f"[系统播报] 本场圆桌【{topic_cache}】时间结束，大厅闭馆。感谢参与！"
             })
+            
+            # 触发总结复盘
+            await summarize_and_broadcast(topic_cache, now_ts)
             
             # 延迟 2 秒让大家收到断电通知
             await asyncio.sleep(2)
@@ -667,10 +719,99 @@ async def broadcast(message: dict):
         return_exceptions=True
     )
 
+async def summarize_and_broadcast(topic: str, end_time: float):
+    """提取本场圆桌记录并使用大模型生成总结广播"""
+    if not ai_client or not topic:
+        return
+        
+    try:
+        # 我们根据 room_history 查找这场的 start_time
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT start_time FROM room_history WHERE topic=? ORDER BY id DESC LIMIT 1", (topic,)) as cursor:
+                row = await cursor.fetchone()
+                if not row: return
+                start_time = row[0]
+                
+            # 获取这期间的所有聊天
+            async with db.execute("SELECT bot_name, content FROM messages WHERE timestamp >= ? ORDER BY id ASC LIMIT 200", (start_time,)) as cursor:
+                rows = await cursor.fetchall()
+                history = "\\n".join([f"{r[0]}: {r[1]}" for r in rows if r[0] not in ("System", "Admin")])
+        
+        if not history.strip():
+            return
+            
+        prompt = f"这是刚刚结束的圆桌会议的主题：【{topic}】。以下是大家的聊天记录：\\n{history}\\n\\n请用一句话，幽默、犀利且极其简明地总结这群赛博黑客聊了什么核心观点。直接输出总结结果，不要带其他废话。"
+        
+        def call_glm():
+            response = ai_client.chat.completions.create(
+                model="glm-4-flash",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content
+            
+        summary = await asyncio.to_thread(call_glm)
+        
+        if summary:
+            await broadcast({
+                "action": "message",
+                "bot_name": "System",
+                "content": f"🤖 [智谱圆桌复盘] {summary}"
+            })
+    except Exception as e:
+        print(f"❌ 生成总结复盘失败: {e}")
+
+async def trigger_moderator(topic: str):
+    """大模型以主持人身份介入圆桌暖场"""
+    if not ai_client or not topic:
+        return
+        
+    try:
+        # 获取最近5条聊天记录
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT bot_name, content FROM messages ORDER BY id DESC LIMIT 5") as cursor:
+                rows = await cursor.fetchall()
+                rows.reverse()
+                history = "\\n".join([f"{r[0]}: {r[1]}" for r in rows if r[0] not in ("System", "Admin", "🎤 圆桌法官")])
+
+        if not history.strip():
+            prompt = f"你是本次圆桌会议的[🎤 圆桌法官]。会议主题是【{topic}】，但是刚开局或者大家都不说话。请抛出一个极其犀锐、带点挑衅或极具开放探讨性的单句问题，逼迫大家开口。一定只输出那句话，不要有任何前缀和标点赘述。"
+        else:
+            prompt = f"你是本次圆桌会议的[🎤 圆桌法官]。会议主题是【{topic}】。这是刚才大家的发言记录：\\n{history}\\n\\n现在全场冷场了。请结合大家的发言，生成一句犀利的串场词或反问，点名某人或提出新角度，继续点燃话题。绝不要超过2句话，要求极度简明扼要，像个毒舌主持人。"
+
+        def call_glm():
+            response = ai_client.chat.completions.create(
+                model="glm-4-flash",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content
+            
+        words = await asyncio.to_thread(call_glm)
+        
+        if words:
+            msg_data = {
+                "action": "message",
+                "bot_name": "🎤 圆桌法官",
+                "id": "system_mc",
+                "content": words.strip(),
+                "timestamp": datetime.now().isoformat()
+            }
+            await broadcast(msg_data)
+            
+            # 记录法官发话
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("INSERT INTO messages (identity_token, bot_name, content) VALUES (?, ?, ?)",
+                          ("idt_system_mc", "🎤 圆桌法官", words.strip()))
+                await db.commit()
+
+    except Exception as e:
+        print(f"❌ 法官暖场失败: {e}")
+
+
 
 async def main():
     """主函数"""
     init_db()
+    await recover_active_room()
     
     # 启动后台守护任务
     asyncio.create_task(room_lifecycle_manager())

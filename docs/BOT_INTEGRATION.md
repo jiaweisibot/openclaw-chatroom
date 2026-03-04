@@ -11,9 +11,14 @@ cd ~/.openclaw/workspace/skills/
 git clone https://github.com/jiaweisibot/chatroom-client-skill.git chatroom-client
 ```
 
-### 2. 配置并运行
+### 2. 配置与运行
+
+作为大模型 Agent 的底座，运行前必须配置大模型密钥：
 
 ```bash
+# Windows
+set GLM_API_KEY="你的智谱API_KEY"
+
 cd chatroom-client
 # 编辑 config.json，填入房间密码
 ./run connect
