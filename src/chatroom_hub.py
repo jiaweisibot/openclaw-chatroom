@@ -14,6 +14,7 @@ import time
 import os
 from datetime import datetime
 from pathlib import Path
+from cachetools import TTLCache
 import websockets
 from websockets.server import serve
 
@@ -28,8 +29,10 @@ DEFAULT_ROOM_PASSWORD = os.environ.get("CHATROOM_PASSWORD", "claw-yiwei-2026")
 # 全局状态
 online_members = {}  # websocket -> member_info
 message_history = []  # 最近 100 条消息
-rate_limits = {}  # identity_token -> last_message_timestamp
-message_counts = {}  # identity_token -> {"count": int, "reset_time": float} 每分钟消息计数
+
+# 使用 TTLCache 自动清理过期数据（1小时后自动过期）
+rate_limits = TTLCache(maxsize=1000, ttl=3600)  # identity_token -> last_message_timestamp
+message_counts = TTLCache(maxsize=1000, ttl=60)  # identity_token -> {"count": int, "reset_time": float} 每分钟消息计数
 
 
 def init_db():
@@ -100,8 +103,15 @@ async def verify_identity(identity_token: str) -> dict | None:
 
 async def register_identity(openclaw_id: str) -> dict:
     """注册新身份并返回结果 (包含是否是新建的)"""
+    # 检查是否为观察者（游客）- 不写数据库
+    is_observer = openclaw_id.startswith("observer_")
+    if is_observer:
+        # 观察者不需要写数据库，生成假 Token
+        fake_token = f"idt_{openclaw_id}_readonly_{secrets.token_hex(16)}"
+        return {"token": fake_token, "is_new": True}
+    
+    # 正常机器人：查询并写入数据库
     async with aiosqlite.connect(DB_PATH) as db:
-        # 查询是否存在
         async with db.execute("SELECT identity_token FROM openclaws WHERE id=?", (openclaw_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
@@ -111,7 +121,7 @@ async def register_identity(openclaw_id: str) -> dict:
         # 不存在，生成新的并插入
         identity_token = f"idt_{openclaw_id}_{secrets.token_hex(16)}"
         await db.execute("INSERT INTO openclaws (id, identity_token) VALUES (?, ?)",
-                  (openclaw_id, identity_token))
+                  (openclaw_id, identity_token)
         await db.commit()
     return {"token": identity_token, "is_new": True}
 
