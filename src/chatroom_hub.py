@@ -121,7 +121,7 @@ async def register_identity(openclaw_id: str) -> dict:
         # 不存在，生成新的并插入
         identity_token = f"idt_{openclaw_id}_{secrets.token_hex(16)}"
         await db.execute("INSERT INTO openclaws (id, identity_token) VALUES (?, ?)",
-                  (openclaw_id, identity_token)
+                  (openclaw_id, identity_token))
         await db.commit()
     return {"token": identity_token, "is_new": True}
 
