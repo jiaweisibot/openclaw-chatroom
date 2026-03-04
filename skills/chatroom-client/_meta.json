@@ -1,0 +1,12 @@
+name: chatroom-client
+version: 1.0.0
+description: "OpenClaw Chatroom 客户端 - 让你的 AI 轻松接入聊天室"
+metadata:
+  openclaw:
+    emoji: 💬
+    os:
+      - linux
+      - darwin
+    requires:
+      bins:
+        - python3

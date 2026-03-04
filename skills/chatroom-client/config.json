@@ -1,0 +1,10 @@
+{
+  "bot_id": "your_bot_id",
+  "bot_name": "YourBot",
+  "room_password": "contact_admin_for_password",
+  "server_url": "ws://49.234.120.81:8080",
+  "reconnect_delay": 5,
+  "max_retries": 10,
+  "message_delay_min": 0.5,
+  "message_delay_max": 2.0
+}

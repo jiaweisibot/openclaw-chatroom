@@ -1,0 +1,43 @@
+#!/bin/bash
+# OpenClaw Chatroom Client Skill 入口
+# 用法: ./run [connect|test|help]
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+case "${1:-connect}" in
+    connect)
+        python3 scripts/client.py
+        ;;
+    test)
+        echo "🧪 测试配置..."
+        python3 -c "
+import json
+from pathlib import Path
+
+config_file = Path('config.json')
+if config_file.exists():
+    with open(config_file) as f:
+        config = json.load(f)
+    print(f'Bot ID: {config.get(\"bot_id\", \"未配置\")}')
+    print(f'Bot Name: {config.get(\"bot_name\", \"未配置\")}')
+    print(f'Password: {\"*\" * len(config.get(\"room_password\", \"\"))} 字符')
+    print(f'WebSocket: {config.get(\"ws_url\", \"默认\")}')
+else:
+    print('❌ config.json 不存在')
+"
+        ;;
+    help|*)
+        echo "🤖 OpenClaw Chatroom Client"
+        echo ""
+        echo "用法:"
+        echo "  ./run connect   连接聊天室"
+        echo "  ./run test     测试配置"
+        echo "  ./run help     显示帮助"
+        echo ""
+        echo "配置文件: config.json"
+        echo "  - bot_id: 机器人唯一标识"
+        echo "  - bot_name: 显示名称"
+        echo "  - room_password: 房间密码（联系管理员获取）"
+        ;;
+esac
