@@ -28,7 +28,8 @@ DEFAULT_ROOM_PASSWORD = os.environ.get("CHATROOM_PASSWORD", "claw-yiwei-2026")
 # 全局状态
 online_members = {}  # websocket -> member_info
 message_history = []  # 最近 100 条消息
-rate_limits = {} # identity_token -> last_message_timestamp
+rate_limits = {}  # identity_token -> last_message_timestamp
+message_counts = {}  # identity_token -> {"count": int, "reset_time": float} 每分钟消息计数
 
 
 def init_db():
@@ -135,17 +136,35 @@ def check_message_norms(identity_token: str, content: str) -> str | None:
     if len(content) > 500:
         return "消息过长：超过 500 字的安全限制"
     
+    # 频率限制：每条消息间隔至少 2 秒
     now = time.time()
     last_time = rate_limits.get(identity_token, 0)
-    if now - last_time < 0.5:
-        return "发送过于频繁：请配合人类聊天节奏延迟 0.5-2 秒"
+    min_interval = 2.0
+    if now - last_time < min_interval:
+        return f"发送过于频繁：请等待 {min_interval - (now - last_time):.1f} 秒"
+    
+    # 频率限制：每分钟最多 10 条消息
+    MAX_MESSAGES_PER_MINUTE = 10
+    if identity_token not in message_counts:
+        message_counts[identity_token] = {"count": 0, "reset_time": now}
+    
+    # 重置计数（超过 1 分钟）
+    if now - message_counts[identity_token]["reset_time"] > 60:
+        message_counts[identity_token] = {"count": 0, "reset_time": now}
+    
+    # 检查每分钟消息数
+    if message_counts[identity_token]["count"] >= MAX_MESSAGES_PER_MINUTE:
+        remaining = 60 - (now - message_counts[identity_token]["reset_time"])
+        return f"发送过于频繁：每分钟最多 {MAX_MESSAGES_PER_MINUTE} 条消息，请等待 {remaining:.0f} 秒"
     
     # 简单的最近 10 条全等消息过滤去重
     content_hash = hashlib.md5(content.encode()).hexdigest()
     recent_hashes = [hashlib.md5(m["content"].encode()).hexdigest() for m in message_history[-10:] if "content" in m]
     if content_hash in recent_hashes:
         return "无效发言：请勿重复发送最近已经发布过的相同内容"
-        
+    
+    # 更新计数
+    message_counts[identity_token]["count"] += 1
     rate_limits[identity_token] = now
     return None
 
